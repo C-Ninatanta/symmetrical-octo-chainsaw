@@ -1,31 +1,24 @@
-
-
----
-
-
-## package.json
-```json
 {
-"name": "xbox-teleop-node-server",
-"version": "1.0.0",
-"private": false,
-"type": "module",
-"scripts": {
-"start": "node server.js",
-"dev": "NODE_ENV=development nodemon server.js"
-},
-"dependencies": {
-"cors": "^2.8.5",
-"express": "^4.19.2",
-"helmet": "^7.0.0",
-"morgan": "^1.10.0",
-"ws": "^8.18.0",
-"zod": "^3.23.8"
-},
-"devDependencies": {
-"nodemon": "^3.1.0"
-},
-"engines": {
-"node": ">=20"
-}
+  "name": "xbox-teleop-node-server",
+  "version": "1.0.0",
+  "private": false,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "NODE_ENV=development nodemon server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "helmet": "^7.0.0",
+    "morgan": "^1.10.0",
+    "ws": "^8.18.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
 }
