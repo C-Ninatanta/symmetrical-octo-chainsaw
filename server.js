@@ -1,113 +1,96 @@
-import express from 'express';
-app.use(express.json({ limit: '256kb' }));
-app.use(morgan('tiny'));
-app.use(express.static('public'));
+// server.js
+// Minimal VR↔Robot relay for Render. Exposes /ping for health checks.
+// WebSocket endpoint is the same origin (wss://<your-app>.onrender.com)
 
+const express = require('express');
+const http = require('http');
+const WebSocket = require('ws');
 
-// ----- Health -----
-app.get('/_health', (req, res) => res.status(200).send('ok'));
+const app = express();
 
+// Health check (Render uses this if configured)
+app.get('/ping', (_req, res) => res.status(200).send('pong'));
 
-// ----- Auth helpers -----
-function checkAuthHeader(req) {
-const hdr = req.headers['authorization'];
-if (!API_KEY) return false; // if server misconfigured, fail closed
-if (!hdr) return false;
-const [scheme, token] = hdr.split(' ');
-return scheme === 'Bearer' && token === API_KEY;
-}
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server });
 
+// Track one VR and one Robot client (simple, extend as needed)
+let vrClient = null;
+let robotClient = null;
 
-function requireAuth(req, res, next) {
-if (checkAuthHeader(req)) return next();
-return res.status(401).json({ error: 'Unauthorized' });
-}
+wss.on('connection', (ws) => {
+  console.log('[WS] New connection');
 
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
 
-// ----- Schema (validates but passes through unknown fields) -----
-const ControllerEvent = z.object({
-type: z.string().default('xbox_input'),
-timestamp: z.number().or(z.string()).transform(Number),
-controller_id: z.string().or(z.number()).optional(),
-axes: z.record(z.number()).optional(),
-buttons: z.record(z.number()).optional()
-}).passthrough();
+  ws.on('message', (data) => {
+    // Expect JSON
+    let msg;
+    try { msg = JSON.parse(data); }
+    catch { console.warn('[WS] Non-JSON message ignored'); return; }
 
+    // First, clients should identify
+    if (msg.type === 'identify') {
+      if (msg.role === 'vr') {
+        vrClient = ws; ws.role = 'vr';
+        console.log('[WS] VR identified');
+        ws.send(JSON.stringify({ type: 'identified', role: 'vr' }));
+      } else if (msg.role === 'robot') {
+        robotClient = ws; ws.role = 'robot';
+        console.log('[WS] Robot identified');
+        ws.send(JSON.stringify({ type: 'identified', role: 'robot' }));
+      } else {
+        console.warn('[WS] Unknown role:', msg.role);
+      }
+      return;
+    }
 
-// ----- In-memory client set -----
-const clients = new Set();
+    // Relay: VR → Robot
+    if (msg.type === 'vr_command') {
+      if (robotClient && robotClient.readyState === WebSocket.OPEN) {
+        robotClient.send(JSON.stringify(msg));
+      } else {
+        console.warn('[WS] No robot connected; dropping vr_command');
+      }
+      return;
+    }
 
+    // Relay: Robot → VR (status or telemetry back)
+    if (msg.type === 'robot_status') {
+      if (vrClient && vrClient.readyState === WebSocket.OPEN) {
+        vrClient.send(JSON.stringify(msg));
+      } else {
+        console.warn('[WS] No VR connected; dropping robot_status');
+      }
+      return;
+    }
 
-// ----- HTTP publish endpoint -----
-app.post('/api/xbox', requireAuth, (req, res) => {
-try {
-const parsed = ControllerEvent.parse(req.body);
-const payload = JSON.stringify(parsed);
-for (const ws of clients) {
-if (ws.readyState === ws.OPEN) ws.send(payload);
-}
-return res.status(202).json({ status: 'forwarded', ts: Date.now() });
-} catch (err) {
-return res.status(400).json({ error: 'Invalid payload', details: err?.message });
-}
+    console.warn('[WS] Unknown message type:', msg.type);
+  });
+
+  ws.on('close', () => {
+    console.log('[WS] Connection closed');
+    if (ws === vrClient) { vrClient = null; console.log('[WS] VR disconnected'); }
+    if (ws === robotClient) { robotClient = null; console.log('[WS] Robot disconnected'); }
+  });
+
+  ws.on('error', (err) => console.error('[WS] Error:', err));
 });
 
+// Keep-alive / stale-connection cleanup
+const interval = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (!ws.isAlive) { console.log('[WS] Terminating stale connection'); return ws.terminate(); }
+    ws.isAlive = false;
+    ws.ping(() => {});
+  });
+}, 30000);
 
-// ----- WebSocket server -----
-const wss = new WebSocketServer({ server, path: '/ws' });
+wss.on('close', () => clearInterval(interval));
 
+// Render provides PORT via env. Fail fast if missing.
+const PORT = process.env.PORT;
+if (!PORT) throw new Error('PORT environment variable is not set');
 
-wss.on('connection', (ws, req) => {
-// Basic auth for publishers (browsers usually can't set headers; allow via flag)
-const isAuthed = checkAuthHeader(req) || ALLOW_UNAUTH_WS;
-ws.isPublisher = false;
-
-
-clients.add(ws);
-
-
-ws.on('message', (data, isBinary) => {
-try {
-if (!isBinary) {
-const text = data.toString();
-const msg = JSON.parse(text);
-
-
-// If client sends {action: "auth", token: "..."} authenticate the connection
-if (msg?.action === 'auth') {
-if (msg?.token && API_KEY && msg.token === API_KEY) {
-ws.isPublisher = true;
-ws.send(JSON.stringify({ type: 'auth_ok' }));
-} else {
-ws.send(JSON.stringify({ type: 'auth_failed' }));
-}
-return;
-}
-
-
-// If posting events over WS, require auth unless explicitly allowed
-if (msg?.type && msg.type !== 'ping') {
-if (!isAuthed && !ws.isPublisher) {
-ws.send(JSON.stringify({ error: 'Unauthorized publish' }));
-return;
-}
-const parsed = ControllerEvent.parse(msg);
-const payload = JSON.stringify(parsed);
-for (const client of clients) {
-if (client !== ws && client.readyState === ws.OPEN) client.send(payload);
-}
-}
-}
-} catch (e) {
-ws.send(JSON.stringify({ error: 'Bad message', details: e?.message }));
-}
-});
-
-
-ws.on('close', () => clients.delete(ws));
-});
-
-
-server.listen(PORT, () => {
-console.log(`Server listening on :${PORT}`);
-});
+server.listen(PORT, () => console.log(`HTTP+WS listening on ${PORT}`));
